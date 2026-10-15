@@ -1106,12 +1106,17 @@ Respond with a JSON object with:
 export const mindcraftEngine = new MindcraftEngine();
 
 export async function handleMindcraftApi(req: any, res: any): Promise<boolean> {
-  const url = req.url || '';
+  // Match on pathname so cache-busting or deployment-added query parameters do
+  // not turn a valid endpoint into Vite's empty 404 response.
+  const url = new URL(req.url || '/', 'http://localhost').pathname;
 
   const sendJson = (status: number, data: any) => {
+    const payload = JSON.stringify(data ?? null);
     res.statusCode = status;
-    res.setHeader('Content-Type', 'application/json');
-    res.end(JSON.stringify(data));
+    res.setHeader('Content-Type', 'application/json; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.end(payload);
   };
 
   const parseBody = async (): Promise<any> => {

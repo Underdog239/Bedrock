@@ -8,19 +8,30 @@ dotenv.config();
 
 function installBotApiMiddleware(server: any) {
   server.middlewares.use(async (req: any, res: any, next: any) => {
-    if (req.url && req.url.startsWith('/api/')) {
-      try {
-        const { handleMindcraftApi } = await import('./src/server/botManager.ts');
-        const handled = await handleMindcraftApi(req, res);
-        if (handled) return;
-      } catch (error: any) {
-        res.statusCode = 500;
-        res.setHeader('Content-Type', 'application/json');
-        res.end(JSON.stringify({ error: error.message || 'Internal server error.' }));
-        return;
-      }
+    if (!req.url?.startsWith('/api/')) {
+      next();
+      return;
     }
-    next();
+
+    const sendError = (status: number, message: string) => {
+      if (res.writableEnded) return;
+      res.statusCode = status;
+      res.setHeader('Content-Type', 'application/json; charset=utf-8');
+      res.setHeader('Cache-Control', 'no-store');
+      res.setHeader('X-Content-Type-Options', 'nosniff');
+      res.end(JSON.stringify({ error: message }));
+    };
+
+    try {
+      const { handleMindcraftApi } = await import('./src/server/botManager.ts');
+      const handled = await handleMindcraftApi(req, res);
+      if (!handled) {
+        const pathname = new URL(req.url, 'http://localhost').pathname;
+        sendError(404, `API route not found: ${req.method || 'GET'} ${pathname}`);
+      }
+    } catch (error: any) {
+      sendError(500, error.message || 'Internal server error.');
+    }
   });
 }
 
