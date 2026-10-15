@@ -1,5 +1,19 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Brain, Send, Sparkles, Zap, RefreshCw } from 'lucide-react';
+import {
+  AlertCircle,
+  Brain,
+  Check,
+  Eye,
+  EyeOff,
+  KeyRound,
+  LockKeyhole,
+  Send,
+  Settings2,
+  Sparkles,
+  X,
+  Zap,
+  RefreshCw,
+} from 'lucide-react';
 import type { BotStateSummary, MindMessage } from '../types/minecraft';
 
 interface AiMindChatProps {
@@ -7,11 +21,139 @@ interface AiMindChatProps {
   onSendCommand: (cmd: string) => void;
 }
 
+type AiProvider = 'openrouter' | 'gemini';
+
+interface AiConfigStatus {
+  configured: boolean;
+  provider: AiProvider;
+  source: 'runtime' | 'environment' | 'none';
+  model: string;
+}
+
 export const AiMindChat: React.FC<AiMindChatProps> = ({ botState }) => {
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [messages, setMessages] = useState<MindMessage[]>([]);
+  const [keyStatus, setKeyStatus] = useState<AiConfigStatus>({
+    configured: false,
+    provider: 'openrouter',
+    source: 'none',
+    model: 'openrouter/auto',
+  });
+  const [isKeyStatusLoading, setIsKeyStatusLoading] = useState(true);
+  const [isKeyDialogOpen, setIsKeyDialogOpen] = useState(false);
+  const [selectedProvider, setSelectedProvider] = useState<AiProvider>('openrouter');
+  const [modelInput, setModelInput] = useState('openrouter/auto');
+  const [apiKeyInput, setApiKeyInput] = useState('');
+  const [isApiKeyVisible, setIsApiKeyVisible] = useState(false);
+  const [isSavingApiKey, setIsSavingApiKey] = useState(false);
+  const [keyNotice, setKeyNotice] = useState('');
+  const [keyError, setKeyError] = useState('');
   const scrollRef = useRef<HTMLDivElement>(null);
+  const keyDialogRef = useRef<HTMLDialogElement>(null);
+
+  const refreshKeyStatus = async () => {
+    setIsKeyStatusLoading(true);
+    try {
+      const response = await fetch('/api/ai/config');
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Unable to read AI provider settings.');
+      setKeyStatus(data as AiConfigStatus);
+      setKeyError('');
+    } catch (error: any) {
+      setKeyError(error.message || 'Unable to read AI provider settings.');
+    } finally {
+      setIsKeyStatusLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    void refreshKeyStatus();
+  }, []);
+
+  useEffect(() => {
+    const dialog = keyDialogRef.current;
+    if (!dialog) return;
+    if (isKeyDialogOpen && !dialog.open) dialog.showModal();
+    if (!isKeyDialogOpen && dialog.open) dialog.close();
+  }, [isKeyDialogOpen]);
+
+  const openKeyDialog = () => {
+    setKeyNotice('');
+    setKeyError('');
+    setApiKeyInput('');
+    setSelectedProvider(keyStatus.provider);
+    setModelInput(keyStatus.model);
+    setIsApiKeyVisible(false);
+    setIsKeyDialogOpen(true);
+    void refreshKeyStatus();
+  };
+
+  const closeKeyDialog = () => {
+    setIsKeyDialogOpen(false);
+    setApiKeyInput('');
+    setIsApiKeyVisible(false);
+  };
+
+  const handleProviderChange = (provider: AiProvider) => {
+    setSelectedProvider(provider);
+    setModelInput(provider === 'openrouter'
+      ? keyStatus.provider === 'openrouter' ? keyStatus.model : 'openrouter/auto'
+      : '');
+  };
+
+  const handleApplyApiKey = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const apiKey = apiKeyInput.trim();
+    if (!apiKey) {
+      setKeyError(`Paste your ${selectedProvider === 'openrouter' ? 'OpenRouter' : 'Gemini'} API key to continue.`);
+      return;
+    }
+
+    setIsSavingApiKey(true);
+    setKeyError('');
+    setKeyNotice('');
+    try {
+      const response = await fetch('/api/ai/config', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ apiKey, provider: selectedProvider, model: modelInput }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Unable to apply AI provider settings.');
+      setKeyStatus(data as AiConfigStatus);
+      setSelectedProvider(data.provider);
+      setModelInput(data.model);
+      setApiKeyInput('');
+      setKeyNotice(`${data.provider === 'openrouter' ? 'OpenRouter' : 'Gemini'} settings applied to the app server.`);
+    } catch (error: any) {
+      setKeyError(error.message || 'Unable to apply AI provider settings.');
+    } finally {
+      setIsSavingApiKey(false);
+    }
+  };
+
+  const handleClearApiKey = async () => {
+    setIsSavingApiKey(true);
+    setKeyError('');
+    setKeyNotice('');
+    try {
+      const response = await fetch('/api/ai/config', { method: 'DELETE' });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Unable to clear the runtime provider settings.');
+      setKeyStatus(data as AiConfigStatus);
+      setSelectedProvider(data.provider);
+      setModelInput(data.model);
+      setApiKeyInput('');
+      setKeyNotice(data.source === 'environment'
+        ? 'Runtime override removed. The server environment configuration is now active.'
+        : 'Runtime override removed. No AI API key is currently configured.');
+    } catch (error: any) {
+      setKeyError(error.message || 'Unable to clear the runtime provider settings.');
+    } finally {
+      setIsSavingApiKey(false);
+    }
+  };
 
   useEffect(() => {
     fetch('/api/bot/mind/history')
@@ -62,10 +204,13 @@ export const AiMindChat: React.FC<AiMindChatProps> = ({ botState }) => {
         body: JSON.stringify({ message: text, sender: 'Player' }),
       });
       const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'The AI request failed.');
       const botMsg: MindMessage = {
         id: Math.random().toString(36).substring(2, 9),
         role: 'assistant',
-        content: data.reply || 'Understood.',
+        content: data.error
+          ? `AI request failed: ${data.error}\n\n${data.reply || ''}`
+          : data.reply || 'Understood.',
         thought: data.thought,
         commandExecuted: data.actionCommand,
         timestamp: new Date().toLocaleTimeString(),
@@ -107,8 +252,8 @@ export const AiMindChat: React.FC<AiMindChatProps> = ({ botState }) => {
           <div>
             <div className="flex items-center gap-2">
               <span className="font-pixel text-xs text-purple-400 font-bold">MINDCRAFT COGNITIVE CORE</span>
-              <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-purple-900/40 text-purple-300 border border-purple-700/50">
-                Gemini 3.8 Flash • MC 1.21.11
+              <span className="max-w-[240px] truncate rounded border border-purple-700/50 bg-purple-900/40 px-2 py-0.5 font-mono text-[10px] text-purple-300">
+                {keyStatus.provider === 'openrouter' ? 'OpenRouter' : 'Gemini'} · {keyStatus.model} · MC 1.21.11
               </span>
             </div>
             <div className="text-xs text-zinc-400 font-mono flex items-center gap-3 mt-0.5">
@@ -118,6 +263,20 @@ export const AiMindChat: React.FC<AiMindChatProps> = ({ botState }) => {
             </div>
           </div>
         </div>
+
+        <button
+          type="button"
+          onClick={openKeyDialog}
+          className="inline-flex shrink-0 items-center gap-2 rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-xs font-medium text-zinc-200 transition-colors hover:border-emerald-700 hover:bg-zinc-800"
+          title="Configure AI provider and API key"
+        >
+          <KeyRound className="h-4 w-4 text-emerald-400" />
+          <span>AI provider</span>
+          <span className={`rounded-full px-2 py-0.5 font-mono text-[10px] ${keyStatus.configured ? 'bg-emerald-950 text-emerald-300' : 'bg-zinc-800 text-zinc-400'}`}>
+            {isKeyStatusLoading ? 'CHECKING' : keyStatus.configured ? 'CONFIGURED' : 'ADD KEY'}
+          </span>
+          <Settings2 className="h-3.5 w-3.5 text-zinc-500" />
+        </button>
 
         {/* Internal Thought Box */}
         <div className="flex-1 min-w-[280px] bg-zinc-950 border border-zinc-800/80 rounded-lg p-2.5 font-mono text-[11px] text-zinc-300">
@@ -215,6 +374,181 @@ export const AiMindChat: React.FC<AiMindChatProps> = ({ botState }) => {
           <span>Send</span>
         </button>
       </form>
+
+      <dialog
+        ref={keyDialogRef}
+        aria-labelledby="ai-provider-settings-title"
+        aria-describedby="ai-provider-settings-description"
+        onCancel={(event) => {
+          event.preventDefault();
+          closeKeyDialog();
+        }}
+        onClick={(event) => {
+          if (event.target === event.currentTarget) closeKeyDialog();
+        }}
+        className="m-auto max-h-[calc(100dvh-2rem)] w-[calc(100%-2rem)] max-w-xl overflow-y-auto rounded-2xl border border-zinc-700 bg-zinc-950 p-0 text-zinc-100 shadow-2xl backdrop:bg-black/75 backdrop:backdrop-blur-sm"
+      >
+        <form onSubmit={handleApplyApiKey} className="p-6 sm:p-7">
+          <div className="flex items-start justify-between gap-4">
+            <div className="flex items-start gap-3">
+              <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-emerald-800/70 bg-emerald-950/60 text-emerald-400">
+                <LockKeyhole className="h-5 w-5" />
+              </div>
+              <div>
+                <p className="font-mono text-[10px] font-semibold uppercase tracking-[0.18em] text-emerald-400">AI provider credentials</p>
+                <h2 id="ai-provider-settings-title" className="mt-1 text-lg font-semibold tracking-tight text-white">AI provider settings</h2>
+                <p id="ai-provider-settings-description" className="mt-1 text-xs leading-relaxed text-zinc-400">
+                  Choose OpenRouter or Gemini and provide a server-side API key. The key is never returned to this page.
+                </p>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={closeKeyDialog}
+              className="rounded-lg p-2 text-zinc-500 transition-colors hover:bg-zinc-800 hover:text-white"
+              aria-label="Close AI provider settings"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+
+          <div className="mt-5 grid gap-4 sm:grid-cols-2">
+            <label htmlFor="ai-provider" className="block text-xs font-medium text-zinc-200">
+              Provider
+              <select
+                id="ai-provider"
+                value={selectedProvider}
+                onChange={(event) => handleProviderChange(event.target.value as AiProvider)}
+                className="mt-2 w-full rounded-xl border border-zinc-700 bg-black/60 px-3.5 py-3 text-sm text-zinc-100 outline-none transition-colors focus:border-emerald-600 focus:ring-2 focus:ring-emerald-600/20"
+              >
+                <option value="openrouter">OpenRouter</option>
+                <option value="gemini">Google Gemini</option>
+              </select>
+            </label>
+            {selectedProvider === 'openrouter' ? (
+              <label htmlFor="openrouter-model" className="block text-xs font-medium text-zinc-200">
+                OpenRouter model ID
+                <input
+                  id="openrouter-model"
+                  value={modelInput}
+                  onChange={(event) => setModelInput(event.target.value)}
+                  placeholder="openrouter/auto"
+                  autoComplete="off"
+                  className="mt-2 w-full rounded-xl border border-zinc-700 bg-black/60 px-3.5 py-3 font-mono text-sm text-zinc-100 outline-none transition-colors placeholder:text-xs placeholder:text-zinc-600 focus:border-emerald-600 focus:ring-2 focus:ring-emerald-600/20"
+                />
+              </label>
+            ) : (
+              <div className="rounded-xl border border-zinc-800 bg-zinc-900/60 px-3.5 py-3">
+                <span className="text-xs font-medium text-zinc-300">Gemini model</span>
+                <p className="mt-2 text-[11px] leading-relaxed text-zinc-500">Model selection is managed by the server.</p>
+              </div>
+            )}
+          </div>
+
+          <div className="mt-5 rounded-xl border border-zinc-800 bg-zinc-900/70 p-3.5">
+            <div className="flex items-center justify-between gap-3">
+              <span className="text-xs font-medium text-zinc-300">Active key source</span>
+              <span className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 font-mono text-[10px] ${
+                keyStatus.configured
+                  ? 'border-emerald-800/70 bg-emerald-950/60 text-emerald-300'
+                  : 'border-zinc-700 bg-zinc-800 text-zinc-400'
+              }`}>
+                {keyStatus.configured ? <Check className="h-3 w-3" /> : <AlertCircle className="h-3 w-3" />}
+                {isKeyStatusLoading
+                  ? 'CHECKING'
+                  : keyStatus.source === 'runtime'
+                    ? 'APP MEMORY'
+                    : keyStatus.source === 'environment'
+                      ? 'ENVIRONMENT'
+                      : 'NOT CONFIGURED'}
+              </span>
+            </div>
+            <p className="mt-2 text-[11px] leading-relaxed text-zinc-500">
+              {keyStatus.source === 'runtime'
+                ? 'The runtime provider setting takes priority over environment variables.'
+                : keyStatus.source === 'environment'
+                  ? `Using ${keyStatus.provider === 'openrouter' ? 'OPENROUTER_API_KEY' : 'GEMINI_API_KEY'} from the server environment.`
+                  : 'Add a key here or configure OPENROUTER_API_KEY on the server.'}
+            </p>
+          </div>
+
+          <label htmlFor="ai-provider-api-key" className="mt-5 block text-xs font-medium text-zinc-200">
+            Your {selectedProvider === 'openrouter' ? 'OpenRouter' : 'Gemini'} API key
+          </label>
+          <div className="relative mt-2">
+            <input
+              id="ai-provider-api-key"
+              name="ai-provider-api-key"
+              type={isApiKeyVisible ? 'text' : 'password'}
+              value={apiKeyInput}
+              onChange={(event) => setApiKeyInput(event.target.value)}
+              autoComplete="off"
+              autoCapitalize="none"
+              autoCorrect="off"
+              spellCheck={false}
+              autoFocus
+              placeholder={`Paste ${selectedProvider === 'openrouter' ? 'OpenRouter' : 'Gemini'} key to override the active provider`}
+              className="w-full select-text rounded-xl border border-zinc-700 bg-black/60 px-3.5 py-3 pr-12 font-mono text-sm text-zinc-100 outline-none transition-colors placeholder:text-xs placeholder:text-zinc-600 focus:border-emerald-600 focus:ring-2 focus:ring-emerald-600/20"
+            />
+            <button
+              type="button"
+              onClick={() => setIsApiKeyVisible((visible) => !visible)}
+              className="absolute right-2 top-1/2 -translate-y-1/2 rounded-lg p-2 text-zinc-500 transition-colors hover:bg-zinc-800 hover:text-zinc-200"
+              aria-label={isApiKeyVisible ? 'Hide API key' : 'Show API key'}
+            >
+              {isApiKeyVisible ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+            </button>
+          </div>
+          <p className="mt-2 text-[11px] leading-relaxed text-zinc-500">
+            Applying stores it in server memory for this run; it is not written to local storage or logs. {selectedProvider === 'openrouter' ? 'OpenRouter' : 'Google'} validates it on the first AI request. Restart the app server to clear it.
+          </p>
+
+          {keyError && (
+            <p role="alert" className="mt-4 flex items-start gap-2 rounded-lg border border-rose-900/70 bg-rose-950/50 px-3 py-2.5 text-xs text-rose-300">
+              <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+              <span>{keyError}</span>
+            </p>
+          )}
+          {keyNotice && (
+            <p role="status" className="mt-4 flex items-start gap-2 rounded-lg border border-emerald-900/70 bg-emerald-950/40 px-3 py-2.5 text-xs text-emerald-300">
+              <Check className="mt-0.5 h-4 w-4 shrink-0" />
+              <span>{keyNotice}</span>
+            </p>
+          )}
+
+          <div className="mt-6 flex flex-col-reverse gap-2 border-t border-zinc-800 pt-4 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              {keyStatus.source === 'runtime' && (
+                <button
+                  type="button"
+                  onClick={handleClearApiKey}
+                  disabled={isSavingApiKey}
+                  className="rounded-lg px-3 py-2 text-xs font-medium text-rose-300 transition-colors hover:bg-rose-950/50 disabled:opacity-50"
+                >
+                  Remove runtime override
+                </button>
+              )}
+            </div>
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={closeKeyDialog}
+                className="rounded-lg border border-zinc-700 px-3.5 py-2 text-xs font-medium text-zinc-300 transition-colors hover:bg-zinc-800"
+              >
+                Close
+              </button>
+              <button
+                type="submit"
+                disabled={!apiKeyInput.trim() || isSavingApiKey}
+                className="inline-flex items-center justify-center gap-2 rounded-lg bg-emerald-600 px-4 py-2 text-xs font-semibold text-white transition-colors hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {isSavingApiKey && <RefreshCw className="h-3.5 w-3.5 animate-spin" />}
+                {isSavingApiKey ? 'Applying…' : 'Apply key'}
+              </button>
+            </div>
+          </div>
+        </form>
+      </dialog>
     </div>
   );
 };

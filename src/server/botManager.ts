@@ -6,6 +6,7 @@ import { plugin as collectBlockPlugin } from 'mineflayer-collectblock';
 import armorManagerPlugin from 'mineflayer-armor-manager';
 import minecraftData from 'minecraft-data';
 import mcProtocol from 'minecraft-protocol';
+import { createServer as createNetServer } from 'node:net';
 import { Vec3 } from 'vec3';
 import { GoogleGenAI } from '@google/genai';
 import {
@@ -27,6 +28,19 @@ export interface BotServerConfig {
   auth: 'offline' | 'microsoft';
   autoReconnect: boolean;
 }
+
+type AiProvider = 'openrouter' | 'gemini';
+type AiKeySource = 'runtime' | 'environment' | 'none';
+
+interface ResolvedAiConfig {
+  provider: AiProvider;
+  apiKey: string | null;
+  model: string;
+  source: AiKeySource;
+}
+
+const DEFAULT_OPENROUTER_MODEL = 'openrouter/auto';
+const DEFAULT_GEMINI_MODEL = 'gemini-3.8-flash';
 
 class MindcraftEngine {
   public bot: Bot | null = null;
@@ -77,10 +91,13 @@ When replying to the user's mind inquiry:
   public logs: TerminalLogEntry[] = [];
   public mindHistory: MindMessage[] = [];
   public waypoints = new Map<string, { x: number; y: number; z: number }>();
-  public viewerInstance: any = null;
   public localServer: any = null;
   public localServerRunning = false;
   public viewerPort = 3001;
+  public cameraStatus: BotStateSummary['cameraStatus'] = 'offline';
+  public cameraError: string | null = null;
+  private cameraBot: Bot | null = null;
+  private runtimeAiConfig: { provider: AiProvider; apiKey: string; model: string } | null = null;
 
   constructor() {
     this.addLog(
@@ -323,9 +340,9 @@ When replying to the user's mind inquiry:
         });
 
         bot.on('end', () => {
-          this.isConnecting = false;
+          if (this.bot === bot) this.isConnecting = false;
           this.addLog('INFO', '[DISCONNECT] Bot connection closed.');
-          this.stopCameraViewer();
+          this.stopCameraViewer(bot);
         });
       } catch (err: any) {
         this.isConnecting = false;
@@ -337,9 +354,11 @@ When replying to the user's mind inquiry:
   }
 
   public disconnectBot() {
-    if (this.bot) {
+    const bot = this.bot;
+    if (bot) {
+      this.stopCameraViewer(bot);
       try {
-        this.bot.quit();
+        bot.quit();
         this.addLog('INFO', '[DISCONNECT] Bot manually disconnected.');
       } catch (e: any) {
         console.error(e);
@@ -347,38 +366,230 @@ When replying to the user's mind inquiry:
       this.bot = null;
     }
     this.isConnecting = false;
-    this.stopCameraViewer();
+    if (!bot) this.stopCameraViewer();
   }
 
-  private async startCameraViewer() {
-    if (!this.bot) return;
+  private async startCameraViewer(bot = this.bot): Promise<void> {
+    if (!bot) {
+      this.cameraStatus = 'offline';
+      this.cameraError = null;
+      return;
+    }
+
+    this.stopCameraViewer();
+    this.cameraStatus = 'starting';
+    this.cameraError = null;
+
     try {
       const prismarineViewer = await import('prismarine-viewer');
       const mineflayerViewer = prismarineViewer.default?.mineflayer || (prismarineViewer as any).mineflayer;
-      if (typeof mineflayerViewer === 'function') {
-        this.stopCameraViewer();
-        this.addLog('INFO', `[CAMERA] Starting real first-person Prismarine Viewer camera on port ${this.viewerPort}...`);
-        this.viewerInstance = mineflayerViewer(this.bot, {
-          port: this.viewerPort,
-          firstPerson: true,
-          viewDistance: 6,
-        });
-        this.addLog('INFO', `[CAMERA] Real camera stream active on port ${this.viewerPort}.`);
+      if (typeof mineflayerViewer !== 'function') {
+        throw new Error('Prismarine Viewer did not provide its Mineflayer adapter.');
       }
+      if (this.bot !== bot) return;
+      await this.ensureCameraPortAvailable();
+      if (this.bot !== bot) return;
+
+      this.cameraBot = bot;
+      this.addLog('INFO', `[CAMERA] Starting first-person Prismarine Viewer on port ${this.viewerPort}...`);
+      mineflayerViewer(bot, {
+        port: this.viewerPort,
+        firstPerson: true,
+        viewDistance: 6,
+        prefix: '/viewer',
+      });
+
+      const isReady = await this.waitForCameraViewer(bot);
+      if (!isReady || this.bot !== bot || this.cameraBot !== bot) return;
+
+      this.cameraStatus = 'ready';
+      this.addLog('INFO', `[CAMERA] First-person stream is ready at /viewer/ on port ${this.viewerPort}.`);
     } catch (err: any) {
-      this.addLog('WARN', `[CAMERA] Notice: ${err.message}`);
+      if (this.bot !== bot) return;
+      this.cameraStatus = 'error';
+      this.cameraError = err.message || 'Prismarine Viewer failed to start.';
+      this.stopCameraViewer(bot);
+      this.cameraStatus = 'error';
+      this.cameraError = err.message || 'Prismarine Viewer failed to start.';
+      this.addLog('ERROR', `[CAMERA] ${this.cameraError}`);
     }
   }
 
-  private stopCameraViewer() {
-    if (this.bot && (this.bot as any).viewer) {
+  private async ensureCameraPortAvailable(): Promise<void> {
+    for (let attempt = 0; attempt < 10; attempt++) {
+      const isAvailable = await new Promise<boolean>((resolve) => {
+        const probe = createNetServer();
+        probe.once('error', () => resolve(false));
+        probe.listen(this.viewerPort, '127.0.0.1', () => {
+          probe.close((error) => resolve(!error));
+        });
+      });
+
+      if (isAvailable) return;
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    }
+
+    throw new Error(`Camera port ${this.viewerPort} is already in use.`);
+  }
+
+  private async waitForCameraViewer(bot: Bot): Promise<boolean> {
+    const timeoutAt = Date.now() + 10000;
+    const viewerUrl = `http://127.0.0.1:${this.viewerPort}/viewer/`;
+
+    while (Date.now() < timeoutAt) {
+      if (this.bot !== bot || this.cameraBot !== bot) return false;
+
       try {
-        (this.bot as any).viewer.close();
-      } catch (e) {
-        // ignore
+        const response = await fetch(viewerUrl);
+        const html = response.ok ? await response.text() : '';
+        if (html.includes('<title>Prismarine Viewer</title>')) return true;
+      } catch {
+        // The viewer may need a short moment to bind its HTTP port.
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+
+    throw new Error(`Prismarine Viewer did not become available at ${viewerUrl}.`);
+  }
+
+  private stopCameraViewer(bot = this.cameraBot) {
+    if (bot && (bot as any).viewer) {
+      try {
+        (bot as any).viewer.close();
+      } catch {
+        // The viewer may already have been closed by a socket or connection event.
       }
     }
-    this.viewerInstance = null;
+
+    if (!bot || this.cameraBot === bot || this.bot === bot) {
+      this.cameraBot = null;
+      this.cameraStatus = 'offline';
+      this.cameraError = null;
+    }
+  }
+
+  public async restartCameraViewer(): Promise<{ success: boolean; message: string }> {
+    if (!this.bot?.entity) {
+      return { success: false, message: 'Connect the bot and wait for it to spawn before starting the camera.' };
+    }
+
+    const bot = this.bot;
+    await this.startCameraViewer(bot);
+    return this.cameraStatus === 'ready'
+      ? { success: true, message: 'Camera stream is ready.' }
+      : { success: false, message: this.cameraError || 'Camera stream did not start.' };
+  }
+
+  private getResolvedAiConfig(): ResolvedAiConfig {
+    if (this.runtimeAiConfig) {
+      return { ...this.runtimeAiConfig, source: 'runtime' };
+    }
+
+    const openRouterKey = process.env.OPENROUTER_API_KEY?.trim() || null;
+    const geminiKey = process.env.GEMINI_API_KEY?.trim() || null;
+    const requestedProvider = process.env.AI_PROVIDER?.trim().toLowerCase();
+    const provider: AiProvider = requestedProvider === 'gemini' || requestedProvider === 'openrouter'
+      ? requestedProvider
+      : openRouterKey
+        ? 'openrouter'
+        : geminiKey
+          ? 'gemini'
+          : 'openrouter';
+    const apiKey = provider === 'openrouter' ? openRouterKey : geminiKey;
+
+    return {
+      provider,
+      apiKey,
+      model: provider === 'openrouter'
+        ? process.env.OPENROUTER_MODEL?.trim() || DEFAULT_OPENROUTER_MODEL
+        : DEFAULT_GEMINI_MODEL,
+      source: apiKey ? 'environment' : 'none',
+    };
+  }
+
+  public getAiConfigStatus(): {
+    configured: boolean;
+    provider: AiProvider;
+    source: AiKeySource;
+    model: string;
+  } {
+    const { apiKey, ...publicConfig } = this.getResolvedAiConfig();
+    return { ...publicConfig, configured: Boolean(apiKey) };
+  }
+
+  public setRuntimeAiConfig(provider: AiProvider, apiKey: string, model?: string): void {
+    this.runtimeAiConfig = {
+      provider,
+      apiKey: apiKey.trim(),
+      model: provider === 'openrouter' ? model?.trim() || DEFAULT_OPENROUTER_MODEL : DEFAULT_GEMINI_MODEL,
+    };
+  }
+
+  public clearRuntimeAiConfig(): void {
+    this.runtimeAiConfig = null;
+  }
+
+  private async generateAiContent(config: ResolvedAiConfig, prompt: string, jsonOutput = false): Promise<string> {
+    if (!config.apiKey) {
+      throw new Error(`No ${config.provider === 'openrouter' ? 'OpenRouter' : 'Gemini'} API key is configured.`);
+    }
+
+    if (config.provider === 'openrouter') {
+      const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${config.apiKey}`,
+          'Content-Type': 'application/json',
+          'X-Title': 'Mindcraft Minecraft Bot',
+        },
+        body: JSON.stringify({
+          model: config.model,
+          messages: [{ role: 'user', content: prompt }],
+        }),
+        signal: AbortSignal.timeout(30000),
+      });
+
+      let data: any;
+      try {
+        data = await response.json();
+      } catch {
+        throw new Error(`OpenRouter returned an unreadable response (HTTP ${response.status}).`);
+      }
+      if (!response.ok) {
+        const message = String(data?.error?.message || `OpenRouter returned HTTP ${response.status}.`);
+        throw new Error(message.split(config.apiKey).join('[redacted]'));
+      }
+
+      const content = data?.choices?.[0]?.message?.content;
+      if (typeof content === 'string') return content;
+      if (Array.isArray(content)) {
+        const text = content.map((part: any) => typeof part?.text === 'string' ? part.text : '').join('');
+        if (text) return text;
+      }
+      throw new Error('OpenRouter returned no text content. Check the selected model and its response format.');
+    }
+
+    const ai = new GoogleGenAI({
+      apiKey: config.apiKey,
+      httpOptions: { headers: { 'User-Agent': 'aistudio-build' } },
+    });
+    const generate = (model: string) => ai.models.generateContent({
+      model,
+      contents: prompt,
+      ...(jsonOutput ? { config: { responseMimeType: 'application/json' } } : {}),
+    });
+
+    try {
+      const response = await generate(config.model);
+      return response.text || '';
+    } catch (firstErr: any) {
+      if (config.model === 'gemini-flash-latest') throw firstErr;
+      const safeError = String(firstErr?.message || 'Primary Gemini model failed.').split(config.apiKey).join('[redacted]');
+      this.addLog('WARN', `Primary Gemini model failed (${safeError}); falling back to gemini-flash-latest.`);
+      const response = await generate('gemini-flash-latest');
+      return response.text || '';
+    }
   }
 
   public async executeCommand(commandStr: string): Promise<string> {
@@ -544,16 +755,13 @@ When replying to the user's mind inquiry:
   }
 
   private async executeNewActionCode(userPrompt: string): Promise<string> {
-    const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey) {
-      return 'GEMINI_API_KEY is not configured for !newAction code generation.';
+    const aiConfig = this.getResolvedAiConfig();
+    if (!aiConfig.apiKey) {
+      return `No ${aiConfig.provider === 'openrouter' ? 'OpenRouter' : 'Gemini'} API key is configured. Add one in AI Mind settings or set the corresponding server environment variable.`;
     }
+    const apiKey = aiConfig.apiKey;
     try {
-      this.addLog('MIND', `[CODER] Synthesizing Mineflayer execution code for Minecraft 1.21.11: "${userPrompt}"...`);
-      const ai = new GoogleGenAI({
-        apiKey,
-        httpOptions: { headers: { 'User-Agent': 'aistudio-build' } },
-      });
+      this.addLog('MIND', `[CODER] Synthesizing Mineflayer execution code for Minecraft 1.21.11 using ${aiConfig.provider}...`);
       const prompt = `You are the Mindcraft Coder module for Mineflayer Minecraft 1.21.11 bots.
 Write an async JavaScript function body that executes the user's request using the 'bot' object.
 Request: "${userPrompt}"
@@ -567,21 +775,8 @@ Rules:
 - Handle errors gracefully with try/catch.
 - Await all promises.`;
 
-      let res;
-      try {
-        res = await ai.models.generateContent({
-          model: 'gemini-3.8-flash',
-          contents: prompt,
-        });
-      } catch (firstErr: any) {
-        this.addLog('WARN', `Coder primary model busy (${firstErr.message}). Falling back to gemini-flash-latest...`);
-        res = await ai.models.generateContent({
-          model: 'gemini-flash-latest',
-          contents: prompt,
-        });
-      }
-
-      let code = res.text?.trim() || '';
+      const responseText = await this.generateAiContent(aiConfig, prompt);
+      let code = responseText.trim();
       if (code.startsWith('```')) {
         code = code.replace(/^```[a-z]*\n/, '').replace(/\n```$/, '');
       }
@@ -595,8 +790,9 @@ Rules:
       }
       return `Code generated successfully:\n${code}\n(Connect bot to execute).`;
     } catch (err: any) {
-      this.addLog('ERROR', `[CODER ERROR] ${err.message}`);
-      return `Failed to execute newAction: ${err.message}`;
+      const safeError = String(err?.message || 'AI provider request failed.').split(apiKey).join('[redacted]');
+      this.addLog('ERROR', `[CODER ERROR] ${safeError}`);
+      return `Failed to execute newAction: ${safeError}`;
     }
   }
 
@@ -621,8 +817,10 @@ Rules:
     thought: string;
     mood: string;
     actionCommand?: string;
+    error?: string;
   }> {
-    const apiKey = process.env.GEMINI_API_KEY;
+    const aiConfig = this.getResolvedAiConfig();
+    const apiKey = aiConfig.apiKey;
     const botStateInfo = {
       connected: !!this.bot,
       version: MINECRAFT_VERSION_1_21_11,
@@ -645,20 +843,18 @@ Rules:
     };
 
     if (!apiKey) {
+      const providerName = aiConfig.provider === 'openrouter' ? 'OpenRouter' : 'Gemini';
       const fallbackReply = `[Mind]: Received "${userMessage}". Operating in 1.21.11 world at [${botStateInfo.position.x}, ${botStateInfo.position.y}, ${botStateInfo.position.z}]. Ready for commands.`;
-      this.mindThought = 'Running cognitive loop without GEMINI_API_KEY.';
+      this.mindThought = `No ${providerName} API key is configured. Add one in AI Mind settings or set the matching server environment variable.`;
       return {
         reply: fallbackReply,
         thought: this.mindThought,
         mood: 'Alert',
+        error: `No ${providerName} API key is configured.`,
       };
     }
 
     try {
-      const ai = new GoogleGenAI({
-        apiKey,
-        httpOptions: { headers: { 'User-Agent': 'aistudio-build' } },
-      });
 
       const conversationContext = this.mindHistory
         .slice(-6)
@@ -675,34 +871,17 @@ Respond with a JSON object with:
 - "mood": your emotional/tactical stance (e.g. "Confident", "Vigilant", "Resource-hungry", "Defensive").
 - "actionCommand": optional Mindcraft command to execute right now if user gave an order (e.g. "!followPlayer Steve", "!collectBlocks oak_log 5", "!stop", "!attack zombie", or empty string).`;
 
-      let response: any;
-      try {
-        const aiCallPromise = ai.models.generateContent({
-          model: 'gemini-3.8-flash',
-          contents: prompt,
-          config: {
-            responseMimeType: 'application/json',
-          },
-        });
-
-        const timeoutPromise = new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error('AI response timed out after 10s')), 10000)
-        );
-
-        response = await Promise.race([aiCallPromise, timeoutPromise]);
-      } catch (firstErr: any) {
-        this.addLog('WARN', `Primary model high-demand/timeout notice: ${firstErr.message}. Falling back to gemini-flash-latest...`);
-        response = await ai.models.generateContent({
-          model: 'gemini-flash-latest',
-          contents: prompt,
-          config: {
-            responseMimeType: 'application/json',
-          },
-        });
+      const rawText = await this.generateAiContent(aiConfig, prompt, true);
+      let jsonText = rawText.trim();
+      if (jsonText.startsWith('```')) {
+        jsonText = jsonText.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
       }
-
-      const text = response.text || '{}';
-      const parsed = JSON.parse(text);
+      const firstBrace = jsonText.indexOf('{');
+      const lastBrace = jsonText.lastIndexOf('}');
+      if (firstBrace >= 0 && lastBrace > firstBrace) {
+        jsonText = jsonText.slice(firstBrace, lastBrace + 1);
+      }
+      const parsed = JSON.parse(jsonText || '{}');
       const thought = parsed.thought || 'Analyzing environment and orders in 1.21.11.';
       const reply = parsed.reply || 'Understood. Carrying out instructions.';
       const mood = parsed.mood || 'Focused';
@@ -738,7 +917,8 @@ Respond with a JSON object with:
         actionCommand,
       };
     } catch (err: any) {
-      this.addLog('ERROR', `[MIND NOTICE] ${err.message}`);
+      const safeError = String(err?.message || 'AI provider request failed.').split(apiKey).join('[redacted]');
+      this.addLog('ERROR', `[MIND NOTICE] ${safeError}`);
       const fallbackReply = `[Mind]: Received "${userMessage}". Operating in 1.21.11 (Protocol 774) world at [${botStateInfo.position.x}, ${botStateInfo.position.y}, ${botStateInfo.position.z}]. Ready for tactical orders.`;
       const fallbackThought = `Evaluating 1.21.11 tactical position. Health: ${botStateInfo.health}/20, Food: ${botStateInfo.food}/20. Standing by.`;
       this.mindThought = fallbackThought;
@@ -771,6 +951,7 @@ Respond with a JSON object with:
         thought: fallbackThought,
         mood: 'Alert',
         actionCommand: actionCmd,
+        error: safeError,
       };
     }
   }
@@ -836,6 +1017,8 @@ Respond with a JSON object with:
       mindThought: this.mindThought,
       mindMood: this.mindMood,
       viewerPort: this.viewerPort,
+      cameraStatus: this.cameraStatus,
+      cameraError: this.cameraError,
       localServerRunning: this.localServerRunning,
     };
   }
@@ -923,6 +1106,55 @@ export async function handleMindcraftApi(req: any, res: any): Promise<boolean> {
 
   if (url === '/api/bot/status' && req.method === 'GET') {
     sendJson(200, mindcraftEngine.getState());
+    return true;
+  }
+
+  if (url === '/api/ai/config' && req.method === 'GET') {
+    res.setHeader('Cache-Control', 'no-store');
+    sendJson(200, mindcraftEngine.getAiConfigStatus());
+    return true;
+  }
+
+  if (url === '/api/ai/config' && req.method === 'PUT') {
+    try {
+      const body = await parseBody();
+      const provider = body.provider;
+      if (provider !== 'openrouter' && provider !== 'gemini') {
+        sendJson(400, { error: 'Choose OpenRouter or Gemini as the AI provider.' });
+        return true;
+      }
+      if (typeof body.apiKey !== 'string' || !body.apiKey.trim()) {
+        sendJson(400, { error: `Enter ${provider === 'openrouter' ? 'an OpenRouter' : 'a Gemini'} API key before applying it.` });
+        return true;
+      }
+      if (body.apiKey.trim().length > 8192) {
+        sendJson(413, { error: 'The API key is too long.' });
+        return true;
+      }
+      const model = typeof body.model === 'string' ? body.model.trim() : '';
+      if (model.length > 256) {
+        sendJson(400, { error: 'The model ID must be 256 characters or fewer.' });
+        return true;
+      }
+      mindcraftEngine.setRuntimeAiConfig(provider, body.apiKey, model);
+      res.setHeader('Cache-Control', 'no-store');
+      sendJson(200, mindcraftEngine.getAiConfigStatus());
+    } catch (e: any) {
+      sendJson(400, { error: e.message || 'Invalid AI provider settings request.' });
+    }
+    return true;
+  }
+
+  if (url === '/api/ai/config' && req.method === 'DELETE') {
+    mindcraftEngine.clearRuntimeAiConfig();
+    res.setHeader('Cache-Control', 'no-store');
+    sendJson(200, mindcraftEngine.getAiConfigStatus());
+    return true;
+  }
+
+  if (url === '/api/bot/camera/restart' && req.method === 'POST') {
+    const result = await mindcraftEngine.restartCameraViewer();
+    sendJson(result.success ? 200 : 409, result);
     return true;
   }
 

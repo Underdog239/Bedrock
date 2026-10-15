@@ -65,6 +65,8 @@ const defaultState: BotStateSummary = {
   mindThought: 'Awaiting connection to Minecraft 1.21.11 server (Protocol 774)...',
   mindMood: 'Ready',
   viewerPort: 3001,
+  cameraStatus: 'offline',
+  cameraError: null,
   localServerRunning: false,
 };
 
@@ -162,6 +164,20 @@ export default function App() {
     }
   };
 
+  const handleRestartCamera = async () => {
+    try {
+      const res = await fetch('/api/bot/camera/restart', { method: 'POST' });
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        setBotState((prev) => ({ ...prev, cameraStatus: 'error', cameraError: data.message || 'Unable to restart camera.' }));
+      }
+      fetchState();
+      fetchLogs();
+    } catch (err: any) {
+      setBotState((prev) => ({ ...prev, cameraStatus: 'error', cameraError: err.message || 'Unable to restart camera.' }));
+    }
+  };
+
   const handleExecuteCommand = async (command: string): Promise<string | void> => {
     try {
       const res = await fetch('/api/bot/command', {
@@ -238,6 +254,7 @@ export default function App() {
             botState={botState}
             onConnect={() => handleConnect()}
             onStartLocalServer={() => handleStartLocalServer(25565)}
+            onRestartCamera={handleRestartCamera}
           />
         )}
         {activeTab === 'mind' && (
