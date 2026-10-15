@@ -15,6 +15,7 @@ import {
   RefreshCw,
 } from 'lucide-react';
 import type { BotStateSummary, MindMessage } from '../types/minecraft';
+import { readJson } from '../lib/api';
 
 interface AiMindChatProps {
   botState: BotStateSummary;
@@ -64,9 +65,11 @@ export const AiMindChat: React.FC<AiMindChatProps> = ({ botState }) => {
     setIsKeyStatusLoading(true);
     try {
       const response = await fetch('/api/ai/config');
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.error || 'Unable to read AI provider settings.');
-      setKeyStatus(data as AiConfigStatus);
+      const data = await readJson<AiConfigStatus & { error?: string }>(response);
+      if (!response.ok || !data) {
+        throw new Error(data?.error || `Unable to read AI provider settings (HTTP ${response.status}).`);
+      }
+      setKeyStatus(data);
       setKeyError('');
     } catch (error: any) {
       setKeyError(error.message || 'Unable to read AI provider settings.');
@@ -127,9 +130,11 @@ export const AiMindChat: React.FC<AiMindChatProps> = ({ botState }) => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ apiKey, provider: selectedProvider, model: modelInput }),
       });
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.error || 'Unable to apply AI provider settings.');
-      setKeyStatus(data as AiConfigStatus);
+      const data = await readJson<AiConfigStatus & { error?: string }>(response);
+      if (!response.ok || !data) {
+        throw new Error(data?.error || `Unable to apply AI provider settings (HTTP ${response.status}).`);
+      }
+      setKeyStatus(data);
       setSelectedProvider(data.provider);
       setModelInput(data.model);
       setApiKeyInput('');
@@ -147,9 +152,11 @@ export const AiMindChat: React.FC<AiMindChatProps> = ({ botState }) => {
     setKeyNotice('');
     try {
       const response = await fetch('/api/ai/config', { method: 'DELETE' });
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.error || 'Unable to clear the runtime provider settings.');
-      setKeyStatus(data as AiConfigStatus);
+      const data = await readJson<AiConfigStatus & { error?: string }>(response);
+      if (!response.ok || !data) {
+        throw new Error(data?.error || `Unable to clear the runtime provider settings (HTTP ${response.status}).`);
+      }
+      setKeyStatus(data);
       setSelectedProvider(data.provider);
       setModelInput(data.model);
       setApiKeyInput('');
@@ -171,9 +178,8 @@ export const AiMindChat: React.FC<AiMindChatProps> = ({ botState }) => {
   const syncHistory = useCallback(async () => {
     try {
       const res = await fetch('/api/bot/mind/history', { cache: 'no-store' });
-      if (!res.ok) return;
-      const data = await res.json();
-      if (!Array.isArray(data)) return;
+      const data = await readJson<MindMessage[]>(res);
+      if (!res.ok || !Array.isArray(data)) return;
       setMessages(data.length > 0 ? data : [MIND_GREETING]);
     } catch {
       // Keep the messages already on screen.
@@ -213,8 +219,8 @@ export const AiMindChat: React.FC<AiMindChatProps> = ({ botState }) => {
         body: JSON.stringify({ message: text, sender: 'Player' }),
       });
       if (!res.ok) {
-        const failure = await res.json().catch(() => ({}));
-        throw new Error(failure.error || 'The AI request failed.');
+        const failure = await readJson<{ error?: string }>(res);
+        throw new Error(failure?.error || `The AI request failed (HTTP ${res.status}).`);
       }
       // The exchange is now on the server, so re-read the transcript instead of
       // rendering a local copy that could drift from the stored one.

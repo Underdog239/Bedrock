@@ -1106,7 +1106,10 @@ Respond with a JSON object with:
 export const mindcraftEngine = new MindcraftEngine();
 
 export async function handleMindcraftApi(req: any, res: any): Promise<boolean> {
-  const url = req.url || '';
+  // Match on the pathname only. An exact-string match on req.url means a single
+  // query string (e.g. /api/bot/status?t=1) falls through to the SPA and hands
+  // the client HTML with a 200 status.
+  const url = (req.url || '').split('?')[0];
 
   const sendJson = (status: number, data: any) => {
     res.statusCode = status;

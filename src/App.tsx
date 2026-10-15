@@ -14,6 +14,7 @@ import {
   type TerminalLogEntry,
 } from './types/minecraft';
 import type { BotServerConfig } from './server/botManager';
+import { readJson } from './lib/api';
 
 const defaultState: BotStateSummary = {
   connected: false,
@@ -80,8 +81,8 @@ export default function App() {
   const fetchState = useCallback(async () => {
     try {
       const res = await fetch('/api/bot/status');
-      if (res.ok) {
-        const data = await res.json();
+      const data = await readJson<BotStateSummary>(res);
+      if (res.ok && data) {
         setBotState(data);
       }
     } catch {
@@ -92,8 +93,8 @@ export default function App() {
   const fetchLogs = useCallback(async () => {
     try {
       const res = await fetch('/api/bot/logs');
-      if (res.ok) {
-        const data = await res.json();
+      const data = await readJson<TerminalLogEntry[]>(res);
+      if (res.ok && data) {
         setLogs(data);
       }
     } catch {
@@ -119,9 +120,13 @@ export default function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(customConfig || {}),
       });
-      const data = await res.json();
-      if (!data.success) {
-        setBotState((prev) => ({ ...prev, connecting: false, error: data.message }));
+      const data = await readJson<any>(res);
+      if (!data?.success) {
+        setBotState((prev) => ({
+          ...prev,
+          connecting: false,
+          error: data?.message || `Unable to connect the bot (HTTP ${res.status}).`,
+        }));
       }
       fetchState();
       fetchLogs();
@@ -167,9 +172,13 @@ export default function App() {
   const handleRestartCamera = async () => {
     try {
       const res = await fetch('/api/bot/camera/restart', { method: 'POST' });
-      const data = await res.json();
-      if (!res.ok || !data.success) {
-        setBotState((prev) => ({ ...prev, cameraStatus: 'error', cameraError: data.message || 'Unable to restart camera.' }));
+      const data = await readJson<any>(res);
+      if (!res.ok || !data?.success) {
+        setBotState((prev) => ({
+          ...prev,
+          cameraStatus: 'error',
+          cameraError: data?.message || `Unable to restart the camera (HTTP ${res.status}).`,
+        }));
       }
       fetchState();
       fetchLogs();
@@ -185,10 +194,10 @@ export default function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ command }),
       });
-      const data = await res.json();
+      const data = await readJson<any>(res);
       fetchState();
       fetchLogs();
-      return data.result;
+      return data?.result ?? '';
     } catch (err: any) {
       fetchLogs();
       return `Command failed: ${err.message}`;
@@ -202,9 +211,9 @@ export default function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ code }),
       });
-      const data = await res.json();
+      const data = await readJson<any>(res);
       fetchLogs();
-      return data.output;
+      return data?.output ?? `Execution error: HTTP ${res.status}`;
     } catch (err: any) {
       fetchLogs();
       return `Execution error: ${err.message}`;
@@ -223,8 +232,8 @@ export default function App() {
         body: JSON.stringify(settings),
       });
       if (res.ok) {
-        const data = await res.json();
-        if (data.state) setBotState(data.state);
+        const data = await readJson<any>(res);
+        if (data?.state) setBotState(data.state);
       }
       fetchLogs();
     } catch {
