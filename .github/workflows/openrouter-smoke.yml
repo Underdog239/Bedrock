@@ -1,0 +1,46 @@
+name: OpenRouter smoke test
+
+on:
+  workflow_dispatch:
+    inputs:
+      model:
+        description: Model ID; the manual smoke test sends one live request and may incur usage
+        required: false
+        default: openrouter/auto
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  verify-openrouter:
+    name: Verify OpenRouter runtime configuration
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.3
+
+      - name: Check that the repository secret is configured
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        run: |
+          if [ -z "$OPENROUTER_API_KEY" ]; then
+            echo "::error::Add OPENROUTER_API_KEY under Settings > Secrets and variables > Actions. Do not paste it into the workflow."
+            exit 1
+          fi
+
+      - name: Install locked dependencies
+        run: bun install --frozen-lockfile --ignore-scripts
+
+      - name: Make one live OpenRouter request
+        env:
+          AI_PROVIDER: openrouter
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          OPENROUTER_MODEL: ${{ inputs.model }}
+        run: node .github/scripts/openrouter-smoke.mjs

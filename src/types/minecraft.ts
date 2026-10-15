@@ -74,6 +74,8 @@ export interface BotStateSummary {
   mindThought: string;
   mindMood: string;
   viewerPort: number;
+  cameraStatus: 'offline' | 'starting' | 'ready' | 'error';
+  cameraError: string | null;
   localServerRunning: boolean;
 }
 
