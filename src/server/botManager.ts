@@ -42,6 +42,11 @@ interface ResolvedAiConfig {
 const DEFAULT_OPENROUTER_MODEL = 'openrouter/auto';
 const DEFAULT_GEMINI_MODEL = 'gemini-3.8-flash';
 
+/** Most recent mind exchanges kept for the panel and for restoring a reloaded session. */
+const MIND_HISTORY_LIMIT = 200;
+/** How many of the most recent mind messages are replayed to the AI as context. */
+const MIND_CONTEXT_MESSAGES = 6;
+
 class MindcraftEngine {
   public bot: Bot | null = null;
   public config: BotServerConfig = {
@@ -116,6 +121,38 @@ When replying to the user's mind inquiry:
     this.logs.push(entry);
     if (this.logs.length > 500) {
       this.logs.shift();
+    }
+  }
+
+  /**
+   * Records one completed mind exchange as a user/assistant pair.
+   * Every path through talkToMind must funnel through here so the panel never
+   * shows a message that the server failed to keep, and older turns are dropped
+   * instead of growing without bound.
+   */
+  private recordMindExchange(
+    userMessage: string,
+    reply: string,
+    options: { sender?: string; thought?: string; commandExecuted?: string } = {}
+  ) {
+    const timestamp = new Date().toLocaleTimeString();
+    this.mindHistory.push({
+      id: Math.random().toString(36).substring(2, 9),
+      role: 'user',
+      content: userMessage,
+      sender: options.sender,
+      timestamp,
+    });
+    this.mindHistory.push({
+      id: Math.random().toString(36).substring(2, 9),
+      role: 'assistant',
+      content: reply,
+      thought: options.thought,
+      commandExecuted: options.commandExecuted,
+      timestamp,
+    });
+    if (this.mindHistory.length > MIND_HISTORY_LIMIT) {
+      this.mindHistory.splice(0, this.mindHistory.length - MIND_HISTORY_LIMIT);
     }
   }
 
@@ -846,6 +883,11 @@ Rules:
       const providerName = aiConfig.provider === 'openrouter' ? 'OpenRouter' : 'Gemini';
       const fallbackReply = `[Mind]: Received "${userMessage}". Operating in 1.21.11 world at [${botStateInfo.position.x}, ${botStateInfo.position.y}, ${botStateInfo.position.z}]. Ready for commands.`;
       this.mindThought = `No ${providerName} API key is configured. Add one in AI Mind settings or set the matching server environment variable.`;
+      this.mindMood = 'Alert';
+      this.recordMindExchange(userMessage, fallbackReply, {
+        sender,
+        thought: this.mindThought,
+      });
       return {
         reply: fallbackReply,
         thought: this.mindThought,
@@ -857,8 +899,8 @@ Rules:
     try {
 
       const conversationContext = this.mindHistory
-        .slice(-6)
-        .map((m) => `${m.role === 'user' ? sender : 'MindCraft'}: ${m.content}`)
+        .slice(-MIND_CONTEXT_MESSAGES)
+        .map((m) => `${m.role === 'user' ? m.sender || sender : 'MindCraft'}: ${m.content}`)
         .join('\n');
 
       const prompt = `${this.systemInstruction}
@@ -891,19 +933,10 @@ Respond with a JSON object with:
       this.mindMood = mood;
       this.addLog('MIND', `[THOUGHT] ${thought}`);
 
-      this.mindHistory.push({
-        id: Math.random().toString(36).substring(2, 9),
-        role: 'user',
-        content: userMessage,
-        timestamp: new Date().toLocaleTimeString(),
-      });
-      this.mindHistory.push({
-        id: Math.random().toString(36).substring(2, 9),
-        role: 'assistant',
-        content: reply,
+      this.recordMindExchange(userMessage, reply, {
+        sender,
         thought,
         commandExecuted: actionCommand,
-        timestamp: new Date().toLocaleTimeString(),
       });
 
       if (actionCommand && actionCommand.trim().length > 0) {
@@ -931,19 +964,10 @@ Respond with a JSON object with:
         this.executeCommand(actionCmd);
       }
 
-      this.mindHistory.push({
-        id: Math.random().toString(36).substring(2, 9),
-        role: 'user',
-        content: userMessage,
-        timestamp: new Date().toLocaleTimeString(),
-      });
-      this.mindHistory.push({
-        id: Math.random().toString(36).substring(2, 9),
-        role: 'assistant',
-        content: fallbackReply,
+      this.recordMindExchange(userMessage, fallbackReply, {
+        sender,
         thought: fallbackThought,
         commandExecuted: actionCmd,
-        timestamp: new Date().toLocaleTimeString(),
       });
 
       return {
@@ -1198,6 +1222,7 @@ export async function handleMindcraftApi(req: any, res: any): Promise<boolean> {
   }
 
   if (url === '/api/bot/mind/history' && req.method === 'GET') {
+    res.setHeader('Cache-Control', 'no-store');
     sendJson(200, mindcraftEngine.mindHistory);
     return true;
   }
