@@ -92,5 +92,7 @@ export interface MindMessage {
   content: string;
   thought?: string;
   commandExecuted?: string;
+  /** Who sent an incoming message, e.g. the Mind panel player or an in-game player name. */
+  sender?: string;
   timestamp: string;
 }

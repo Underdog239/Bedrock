@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import {
   AlertCircle,
   Brain,
@@ -29,6 +29,14 @@ interface AiConfigStatus {
   source: 'runtime' | 'environment' | 'none';
   model: string;
 }
+
+const MIND_GREETING: MindMessage = {
+  id: 'init-1',
+  role: 'assistant',
+  content: `I am MindCraft, your autonomous Minecraft bot running on version 1.21.11 (Protocol 774). You can talk to my cognitive mind directly here or give me tasks. What are your orders?`,
+  thought: 'Cognitive loop online. Monitoring 1.21.11 environment and standing by for orders.',
+  timestamp: new Date().toLocaleTimeString(),
+};
 
 export const AiMindChat: React.FC<AiMindChatProps> = ({ botState }) => {
   const [input, setInput] = useState('');
@@ -155,26 +163,26 @@ export const AiMindChat: React.FC<AiMindChatProps> = ({ botState }) => {
     }
   };
 
-  useEffect(() => {
-    fetch('/api/bot/mind/history')
-      .then((res) => res.json())
-      .then((data) => {
-        if (Array.isArray(data) && data.length > 0) {
-          setMessages(data);
-        } else {
-          setMessages([
-            {
-              id: 'init-1',
-              role: 'assistant',
-              content: `I am MindCraft, your autonomous Minecraft bot running on version 1.21.11 (Protocol 774). You can talk to my cognitive mind directly here or give me tasks. What are your orders?`,
-              thought: 'Cognitive loop online. Monitoring 1.21.11 environment and standing by for orders.',
-              timestamp: new Date().toLocaleTimeString(),
-            },
-          ]);
-        }
-      })
-      .catch(() => {});
+  /**
+   * The server transcript is the source of truth. Rendering from it keeps what
+   * the panel shows identical to what survives a reload or a tab switch.
+   * Failures are swallowed so a dropped request never blanks the conversation.
+   */
+  const syncHistory = useCallback(async () => {
+    try {
+      const res = await fetch('/api/bot/mind/history', { cache: 'no-store' });
+      if (!res.ok) return;
+      const data = await res.json();
+      if (!Array.isArray(data)) return;
+      setMessages(data.length > 0 ? data : [MIND_GREETING]);
+    } catch {
+      // Keep the messages already on screen.
+    }
   }, []);
+
+  useEffect(() => {
+    void syncHistory();
+  }, [syncHistory]);
 
   useEffect(() => {
     if (scrollRef.current) {
@@ -190,6 +198,7 @@ export const AiMindChat: React.FC<AiMindChatProps> = ({ botState }) => {
       id: Math.random().toString(36).substring(2, 9),
       role: 'user',
       content: text,
+      sender: 'Player',
       timestamp: new Date().toLocaleTimeString(),
     };
 
@@ -203,19 +212,13 @@ export const AiMindChat: React.FC<AiMindChatProps> = ({ botState }) => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ message: text, sender: 'Player' }),
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'The AI request failed.');
-      const botMsg: MindMessage = {
-        id: Math.random().toString(36).substring(2, 9),
-        role: 'assistant',
-        content: data.error
-          ? `AI request failed: ${data.error}\n\n${data.reply || ''}`
-          : data.reply || 'Understood.',
-        thought: data.thought,
-        commandExecuted: data.actionCommand,
-        timestamp: new Date().toLocaleTimeString(),
-      };
-      setMessages((prev) => [...prev, botMsg]);
+      if (!res.ok) {
+        const failure = await res.json().catch(() => ({}));
+        throw new Error(failure.error || 'The AI request failed.');
+      }
+      // The exchange is now on the server, so re-read the transcript instead of
+      // rendering a local copy that could drift from the stored one.
+      await syncHistory();
     } catch (err: any) {
       setMessages((prev) => [
         ...prev,
@@ -301,7 +304,9 @@ export const AiMindChat: React.FC<AiMindChatProps> = ({ botState }) => {
             className={`flex flex-col ${m.role === 'user' ? 'items-end' : 'items-start'}`}
           >
             <div className="flex items-center gap-2 mb-1 text-[10px] font-mono text-zinc-500">
-              <span className="font-bold text-zinc-400">{m.role === 'user' ? 'YOU (Player)' : 'MINDCRAFT BOT'}</span>
+              <span className="font-bold text-zinc-400">
+                {m.role === 'user' ? (m.sender || 'YOU (Player)').toUpperCase() : 'MINDCRAFT BOT'}
+              </span>
               <span>•</span>
               <span>{m.timestamp}</span>
             </div>
