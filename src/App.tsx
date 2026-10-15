@@ -14,6 +14,7 @@ import {
   type TerminalLogEntry,
 } from './types/minecraft';
 import type { BotServerConfig } from './server/botManager';
+import { apiRequest } from './lib/api';
 
 const defaultState: BotStateSummary = {
   connected: false,
@@ -79,25 +80,19 @@ export default function App() {
 
   const fetchState = useCallback(async () => {
     try {
-      const res = await fetch('/api/bot/status');
-      if (res.ok) {
-        const data = await res.json();
-        setBotState(data);
-      }
+      const data = await apiRequest<BotStateSummary>('/api/bot/status');
+      setBotState(data);
     } catch {
-      // Backend may be starting
+      // Backend may be starting. Keep the last known state while it recovers.
     }
   }, []);
 
   const fetchLogs = useCallback(async () => {
     try {
-      const res = await fetch('/api/bot/logs');
-      if (res.ok) {
-        const data = await res.json();
-        setLogs(data);
-      }
+      const data = await apiRequest<TerminalLogEntry[]>('/api/bot/logs');
+      setLogs(data);
     } catch {
-      // Ignore
+      // Keep the last logs if a polling request is interrupted.
     }
   }, []);
 
@@ -114,12 +109,11 @@ export default function App() {
   const handleConnect = async (customConfig?: Partial<BotServerConfig>) => {
     try {
       setBotState((prev) => ({ ...prev, connecting: true, error: null }));
-      const res = await fetch('/api/bot/connect', {
+      const data = await apiRequest<{ success: boolean; message: string }>('/api/bot/connect', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(customConfig || {}),
       });
-      const data = await res.json();
       if (!data.success) {
         setBotState((prev) => ({ ...prev, connecting: false, error: data.message }));
       }
@@ -132,7 +126,7 @@ export default function App() {
 
   const handleDisconnect = async () => {
     try {
-      await fetch('/api/bot/disconnect', { method: 'POST' });
+      await apiRequest('/api/bot/disconnect', { method: 'POST' });
       fetchState();
       fetchLogs();
     } catch {
@@ -142,7 +136,7 @@ export default function App() {
 
   const handleStartLocalServer = async (port = 25565) => {
     try {
-      await fetch('/api/server/start-local', {
+      await apiRequest('/api/server/start-local', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ port }),
@@ -156,7 +150,7 @@ export default function App() {
 
   const handleStopLocalServer = async () => {
     try {
-      await fetch('/api/server/stop-local', { method: 'POST' });
+      await apiRequest('/api/server/stop-local', { method: 'POST' });
       fetchState();
       fetchLogs();
     } catch {
@@ -166,9 +160,8 @@ export default function App() {
 
   const handleRestartCamera = async () => {
     try {
-      const res = await fetch('/api/bot/camera/restart', { method: 'POST' });
-      const data = await res.json();
-      if (!res.ok || !data.success) {
+      const data = await apiRequest<{ success: boolean; message: string }>('/api/bot/camera/restart', { method: 'POST' });
+      if (!data.success) {
         setBotState((prev) => ({ ...prev, cameraStatus: 'error', cameraError: data.message || 'Unable to restart camera.' }));
       }
       fetchState();
@@ -180,12 +173,11 @@ export default function App() {
 
   const handleExecuteCommand = async (command: string): Promise<string | void> => {
     try {
-      const res = await fetch('/api/bot/command', {
+      const data = await apiRequest<{ result: string }>('/api/bot/command', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ command }),
       });
-      const data = await res.json();
       fetchState();
       fetchLogs();
       return data.result;
@@ -197,12 +189,11 @@ export default function App() {
 
   const handleExecuteTerminal = async (code: string): Promise<string | void> => {
     try {
-      const res = await fetch('/api/bot/terminal/exec', {
+      const data = await apiRequest<{ output: string }>('/api/bot/terminal/exec', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ code }),
       });
-      const data = await res.json();
       fetchLogs();
       return data.output;
     } catch (err: any) {
@@ -217,15 +208,12 @@ export default function App() {
     systemInstruction?: string;
   }) => {
     try {
-      const res = await fetch('/api/bot/settings', {
+      const data = await apiRequest<{ success: boolean; state?: BotStateSummary }>('/api/bot/settings', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(settings),
       });
-      if (res.ok) {
-        const data = await res.json();
-        if (data.state) setBotState(data.state);
-      }
+      if (data.state) setBotState(data.state);
       fetchLogs();
     } catch {
       // Ignore
